@@ -100,6 +100,15 @@ h3{font-size:16px;font-weight:650}
 .palco{position:relative;width:100%;border-radius:var(--r);overflow:hidden;border:1px solid var(--line);
   background:radial-gradient(80% 90% at 50% 20%, #1D242E, #0E1218 75%)}
 .palco canvas{width:100%;max-width:340px;display:block;margin:0 auto}
+.palco video{width:100%;display:block;background:#000;aspect-ratio:16/9;object-fit:cover}
+.angulos{position:absolute;right:10px;top:10px;display:flex;gap:5px;padding:4px;border-radius:13px;
+  background:rgba(9,11,14,.66);backdrop-filter:blur(10px);border:1px solid var(--line-2)}
+.angulos button{padding:7px 12px;border-radius:9px;font-size:12px;font-weight:700;color:var(--dim)}
+.angulos button.on{background:linear-gradient(180deg,var(--acc-2),var(--acc));color:#fff}
+.mapas{display:flex;gap:12px;justify-content:center}
+.mapas img{width:47%;max-width:150px;max-height:220px;object-fit:contain;border-radius:14px;
+  background:#0E1218;border:1px solid var(--line);padding:6px}
+img.thumb{object-fit:cover}
 .palco .tag{position:absolute;left:12px;top:12px;font-size:11px;font-weight:750;letter-spacing:.07em;
   text-transform:uppercase;color:var(--dim);background:rgba(9,11,14,.6);padding:5px 9px;border-radius:8px;
   border:1px solid var(--line)}

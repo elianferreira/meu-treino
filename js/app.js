@@ -38,20 +38,38 @@ function treinosDaSemana(){
   return S.hist.filter(s => s.ts >= limite);
 }
 
-/* ---------------- animação do movimento ---------------- */
+/* ---------------- vídeo da execução ---------------- */
 function palcoHTML(ex){
-  if (!MOV[ex.id]) return '';
-  return '<div class="palco"><span class="tag">Execução</span>'
-    + '<canvas data-anim="' + ex.id + '"></canvas>'
-    + '<button class="pausa" data-act="pausar">❚❚</button></div>'
-    + '<div class="legenda"><span class="ponto"></span> Em vermelho, o músculo que trabalha no movimento.</div>';
-}
-function thumbHTML(id){
-  return MOV[id] ? '<canvas class="thumb" data-thumb="' + id + '"></canvas>'
-                 : '<span class="badge">–</span>';
+  const d = VID[ex.id];
+  if (!d) return MOV[ex.id] ? '<div class="palco"><canvas data-anim="' + ex.id + '"></canvas></div>' : '';
+  const angulos = d.v.length > 1
+    ? '<div class="angulos">' + d.v.map((_, i) =>
+        '<button class="' + (i ? '' : 'on') + '" data-act="angulo" data-i="' + i + '">'
+        + (i ? 'Lado' : 'Frente') + '</button>').join('') + '</div>'
+    : '';
+  return '<div class="palco">'
+    + '<video data-ex="' + ex.id + '" src="' + midia(d.v[0]) + '" poster="' + midia(d.p) + '"'
+    + ' playsinline muted loop autoplay preload="metadata"></video>'
+    + angulos + '</div>';
 }
 
-/* desenha as miniaturas e liga a animação grande depois de cada render */
+function mapaHTML(ex){
+  const d = VID[ex.id];
+  if (!d || !d.m) return '';
+  return '<div class="card"><div class="xs dim" style="margin-bottom:12px">Músculos trabalhados</div>'
+    + '<div class="mapas"><img src="' + midia(d.m) + '" alt="Vista de frente" loading="lazy">'
+    + (d.mc ? '<img src="' + midia(d.mc) + '" alt="Vista de costas" loading="lazy">' : '') + '</div>'
+    + '<div class="legenda" style="justify-content:center"><span class="ponto"></span> '
+    + h(ex.musculos) + '</div></div>';
+}
+
+function thumbHTML(id){
+  const d = VID[id];
+  if (d && d.p) return '<img class="thumb" src="' + midia(d.p) + '" alt="" loading="lazy">';
+  return MOV[id] ? '<canvas class="thumb" data-thumb="' + id + '"></canvas>' : '<span class="badge">–</span>';
+}
+
+/* liga vídeo e miniaturas depois de cada render; se o vídeo falhar, cai na animação desenhada */
 let animAtual = null;
 function montarCanvas(){
   if (animAtual) { animAtual.parar(); animAtual = null; }
@@ -62,8 +80,23 @@ function montarCanvas(){
     const c = cv.getContext('2d'); c.scale(dpr, dpr);
     quadro(c, m, .62);
   });
+
+  const v = document.querySelector('video[data-ex]');
+  if (v) {
+    v.addEventListener('error', () => trocarPorDesenho(v.dataset.ex), { once:true });
+    const tocarVideo = () => { const p = v.play(); if (p && p.catch) p.catch(() => {}); };
+    tocarVideo();
+    v.addEventListener('loadeddata', tocarVideo, { once:true });
+  }
   const grande = document.querySelector('canvas[data-anim]');
   if (grande && MOV[grande.dataset.anim]) animAtual = tocar(grande, MOV[grande.dataset.anim]);
+}
+
+function trocarPorDesenho(exId){
+  const palco = document.querySelector('.palco');
+  if (!palco || !MOV[exId]) return;
+  palco.innerHTML = '<canvas data-anim="' + exId + '"></canvas>';
+  animAtual = tocar(palco.querySelector('canvas'), MOV[exId]);
 }
 
 /* ---------------- onboarding ---------------- */
@@ -199,15 +232,13 @@ function telaEx(){
   const carga = S.cargas[ex.id];
   return '<div class="wrap fade" style="padding-top:16px">'
     + palcoHTML(ex)
-    + '<h2 style="margin:16px 0 4px">' + h(ex.nome) + '</h2>'
-    + '<div class="sm dim" style="margin-bottom:14px">' + h(ex.musculos) + '</div>'
+    + '<h2 style="margin:16px 0 14px">' + h(ex.nome) + '</h2>'
+    + mapaHTML(ex)
     + (carga ? '<div class="card tight"><span class="xs dim">Última carga registrada</span><br><b>' + h(carga.peso) + ' kg × ' + h(carga.reps) + ' repetições</b></div>' : '')
     + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Como executar</div>'
     + '<ol class="steps">' + ex.exec.map(p => '<li>' + h(p) + '</li>').join('') + '</ol></div>'
     + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Erros comuns</div>'
     + '<ul class="errs">' + ex.erros.map(p => '<li>' + h(p) + '</li>').join('') + '</ul></div>'
-    + '<a class="sm dim" style="display:block;text-align:center;padding:6px 0" target="_blank" rel="noopener" href="'
-    + 'https://www.youtube.com/results?search_query=' + encodeURIComponent(ex.q || ex.nome) + '">Quer ver alguém fazendo? Buscar no YouTube ↗</a>'
     + '<div style="height:20px"></div></div>';
 }
 
@@ -301,7 +332,7 @@ function telaAjustes(){
     + '<button class="btn ghost" data-act="restaurar" style="margin-top:9px">Restaurar a partir de um backup</button>'
     + '<button class="btn danger" data-act="apagar" style="margin-top:9px">Apagar tudo e recomeçar</button></div>'
     + '<div class="card tight"><span class="sm dim">Este app guarda tudo no seu próprio iPhone. '
-    + 'Nada é enviado para servidor nenhum. Os vídeos abrem direto do YouTube.</span></div>'
+    + 'Nada é enviado para servidor nenhum. Os vídeos de execução e os mapas musculares vêm do MuscleWiki.</span></div>'
     + '<div class="card tight"><span class="sm dim">Este app não substitui a orientação de um profissional de educação física. '
     + 'Se sentir dor durante um exercício, pare.</span></div>'
     + '<div style="height:20px"></div></div>';
@@ -408,6 +439,14 @@ document.addEventListener('click', ev => {
   }
   else if (a === 'onb-back') { S.onb.passo--; render(); }
   else if (a === 'pausar') { if (animAtual) alvo.textContent = animAtual.alternar() ? '❚❚' : '▶'; }
+  else if (a === 'angulo') {
+    const v = document.querySelector('video[data-ex]'), d = VID[S.ctx.ex];
+    if (v && d) {
+      v.src = midia(d.v[Number(alvo.dataset.i)]);
+      const p = v.play(); if (p && p.catch) p.catch(() => {});
+      alvo.parentNode.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === alvo));
+    }
+  }
   else if (a === 'tab') ir(alvo.dataset.k);
   else if (a === 'dia') ir('dia', { dia:Number(alvo.dataset.i) });
   else if (a === 'ex') ir('ex', { ex:alvo.dataset.id, volta:alvo.dataset.volta });
