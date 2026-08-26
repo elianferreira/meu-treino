@@ -1,9 +1,9 @@
 /* Service worker: deixa o app abrir offline */
-const CACHE = 'meutreino-v4';
+const CACHE = 'meutreino-v6';
 const ARQUIVOS = [
   './', './index.html', './css/app.css',
-  './js/data.js', './js/videos.js', './js/anim.js', './js/movimentos.js', './js/engine.js', './js/nuvem.js', './js/app.js',
-  './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-180.png'
+  './js/data.js', './js/videos.js', './js/anim.js', './js/movimentos.js', './js/engine.js', './js/app.js',
+  './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-180.png', './icons/icon-512-maskable.png'
 ];
 
 self.addEventListener('install', ev => {

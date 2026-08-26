@@ -3,7 +3,7 @@
 
 const KEY = 'meutreino.v1';
 const S = { cfg:null, plano:null, meus:[], hist:[], sessao:null, cargas:{}, tela:'hoje', ctx:{},
-            atualizado:0, ultimoSync:0, avisoSync:'',
+            atualizado:0,
             onb:{ passo:0, resp:{ evitar:[] } } };
 
 /* ---------------- armazenamento ---------------- */
@@ -17,8 +17,50 @@ function gravar(d){
 }
 function salvar(){
   S.atualizado = Date.now();
-  gravar(dadosLocais());
-  if (typeof agendarSync === 'function') agendarSync();
+  const d = dadosLocais();
+  gravar(d);
+  espelhar(d);
+}
+
+/* ---------------- espelho em IndexedDB ----------------
+   O localStorage do iPhone pode ser limpo pelo sistema. Guardamos uma cópia
+   em IndexedDB e, se a principal sumir, o app recupera sozinho na abertura. */
+let bancoIDB = null;
+function abrirBanco(){
+  return new Promise(resolve => {
+    if (bancoIDB) return resolve(bancoIDB);
+    if (!window.indexedDB) return resolve(null);
+    let req;
+    try { req = indexedDB.open('meutreino', 1); } catch(e){ return resolve(null); }
+    req.onupgradeneeded = () => { try { req.result.createObjectStore('estado'); } catch(e){} };
+    req.onsuccess = () => { bancoIDB = req.result; resolve(bancoIDB); };
+    req.onerror = () => resolve(null);
+  });
+}
+async function espelhar(d){
+  const b = await abrirBanco(); if (!b) return;
+  try { b.transaction('estado', 'readwrite').objectStore('estado').put(d, 'atual'); } catch(e){}
+}
+async function lerEspelho(){
+  const b = await abrirBanco(); if (!b) return null;
+  return new Promise(resolve => {
+    try {
+      const r = b.transaction('estado', 'readonly').objectStore('estado').get('atual');
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    } catch(e){ resolve(null); }
+  });
+}
+/* na abertura: se o espelho estiver mais novo que o principal, ele manda */
+async function conferirEspelho(){
+  const copia = await lerEspelho();
+  if (!copia) { espelhar(dadosLocais()); return; }
+  if ((copia.atualizado || 0) > (S.atualizado || 0) + 1000) {
+    aplicarDados(copia, copia.atualizado);
+    console.info('dados recuperados do espelho local');
+  } else {
+    espelhar(dadosLocais());
+  }
 }
 function carregar(){
   try {
@@ -27,7 +69,7 @@ function carregar(){
     S.sessao = d.sessao || null; S.cargas = d.cargas || {}; S.atualizado = d.atualizado || 0;
   } catch(e){ console.warn('dados corrompidos, começando do zero', e); }
 }
-/* usado pela sincronização quando a nuvem está mais nova que o aparelho */
+/* usado quando a cópia do IndexedDB está mais nova que o armazenamento principal */
 function aplicarDados(d, quando){
   if (!d) return;
   S.cfg = d.cfg || null; S.plano = d.plano || null; S.meus = d.meus || []; S.hist = d.hist || [];
@@ -126,10 +168,12 @@ function montarCanvas(){
 
   const v = document.querySelector('video[data-ex]');
   if (v) {
-    v.addEventListener('error', () => trocarPorDesenho(v.dataset.ex), { once:true });
+    // se o vídeo não vier em alguns segundos (internet ruim ou offline), mostra a animação desenhada
+    const prazo = setTimeout(() => { if (v.readyState < 2) trocarPorDesenho(v.dataset.ex); }, 4500);
+    v.addEventListener('error', () => { clearTimeout(prazo); trocarPorDesenho(v.dataset.ex); }, { once:true });
     const tocarVideo = () => { const p = v.play(); if (p && p.catch) p.catch(() => {}); };
     tocarVideo();
-    v.addEventListener('loadeddata', tocarVideo, { once:true });
+    v.addEventListener('loadeddata', () => { clearTimeout(prazo); tocarVideo(); }, { once:true });
   }
   const grande = document.querySelector('canvas[data-anim]');
   if (grande && MOV[grande.dataset.anim]) animAtual = tocar(grande, MOV[grande.dataset.anim]);
@@ -452,58 +496,30 @@ function telaHistorico(){
 }
 
 /* ---------------- tela: ajustes ---------------- */
-function statusSync(){
-  if (S.avisoSync) return S.avisoSync;
-  if (!S.ultimoSync) return 'ainda não sincronizou neste aparelho';
-  const min = Math.round((Date.now() - S.ultimoSync) / 60000);
-  return min < 1 ? 'sincronizado agora' : 'sincronizado há ' + plural(min, 'minuto', 'minutos');
-}
-
-function traduzErro(m){
-  m = String(m || '');
-  if (/Invalid login/i.test(m)) return 'E-mail ou senha incorretos.';
-  if (/already registered/i.test(m)) return 'Esse e-mail já tem conta. Use Entrar.';
-  if (/at least 6/i.test(m)) return 'A senha precisa de pelo menos 6 caracteres.';
-  if (/valid email/i.test(m)) return 'E-mail inválido.';
-  if (/Failed to fetch|NetworkError/i.test(m)) return 'Sem conexão com a internet.';
-  if (/rate limit|too many/i.test(m)) return 'Muitas tentativas. Espere um minuto.';
-  return m;
-}
-
-function cardConta(){
-  if (!nuvemLigada())
-    return '<div class="card"><div class="xs dim" style="margin-bottom:8px">Conta</div>'
-      + '<div class="sm dim">A sincronização entre aparelhos ainda não foi configurada. '
-      + 'Por enquanto os dados ficam só neste aparelho.</div></div>';
-
-  if (logado())
-    return '<div class="card"><div class="xs dim" style="margin-bottom:10px">Conta</div>'
-      + '<div class="row"><span class="badge acc">' + h((AUTH.email || '?').charAt(0).toUpperCase()) + '</span>'
-      + '<span class="grow"><span class="sm" style="font-weight:650">' + h(AUTH.email || '') + '</span>'
-      + '<span class="sm dim">' + h(statusSync()) + '</span></span></div>'
-      + '<button class="btn ghost" data-act="sync" style="margin-top:14px">Sincronizar agora</button>'
-      + '<button class="btn danger" data-act="sair" style="margin-top:10px">Sair da conta</button></div>';
-
-  return '<div class="card"><div class="xs dim" style="margin-bottom:10px">Conta</div>'
-    + '<div class="sm dim" style="margin-bottom:13px">Entre para guardar treinos e histórico na nuvem '
-    + 'e continuar de onde parou em qualquer aparelho.</div>'
-    + '<input class="inp busca" id="campoEmail" type="email" inputmode="email" autocomplete="email" placeholder="seu@email.com">'
-    + '<input class="inp busca" id="campoSenha" type="password" autocomplete="current-password" placeholder="senha" style="margin-top:9px">'
-    + (S.avisoSync ? '<div class="sm" style="color:#FF8A7E;margin-top:10px">' + h(S.avisoSync) + '</div>' : '')
-    + '<button class="btn" data-act="entrar" style="margin-top:13px">Entrar</button>'
-    + '<button class="btn ghost" data-act="criar-conta" style="margin-top:10px">Criar conta</button></div>';
+function cardDados(){
+  const quando = S.atualizado ? new Date(S.atualizado) : null;
+  return '<div class="card"><div class="xs dim" style="margin-bottom:10px">Seus dados</div>'
+    + '<div class="sm dim" style="margin-bottom:13px">Tudo fica guardado neste aparelho, sem conta e sem servidor. '
+    + 'O app mant\u00e9m uma c\u00f3pia de seguran\u00e7a interna e recupera sozinho se o sistema limpar o armazen'
+    + 'amento principal.</div>'
+    + (quando ? '<div class="sm dim">\u00daltima altera\u00e7\u00e3o: ' + quando.toLocaleDateString('pt-BR')
+        + ' \u00e0s ' + quando.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' }) + '</div>' : '')
+    + '<button class="btn ghost" data-act="baixar-backup" style="margin-top:13px">Salvar backup em arquivo</button>'
+    + '<button class="btn ghost" data-act="abrir-arquivo" style="margin-top:10px">Restaurar de um arquivo</button>'
+    + '<input type="file" id="arquivoBackup" accept="application/json,.json" style="display:none">'
+    + '</div>';
 }
 
 function telaAjustes(){
   return '<div class="wrap fade" style="padding-top:16px">'
-    + cardConta()
+    + cardDados()
     + cardInstalar()
     + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Rotina</div>'
     + '<button class="btn ghost" data-act="refazer">Refazer o questionário</button>'
     + '<button class="btn ghost" data-act="variar" style="margin-top:9px">Gerar outra variação</button></div>'
-    + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Meus dados</div>'
-    + '<button class="btn ghost" data-act="backup">Copiar backup dos meus dados</button>'
-    + '<button class="btn ghost" data-act="restaurar" style="margin-top:9px">Restaurar a partir de um backup</button>'
+    + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Backup por texto</div>'
+    + '<button class="btn ghost" data-act="backup">Copiar meus dados</button>'
+    + '<button class="btn ghost" data-act="restaurar" style="margin-top:9px">Colar dados de um backup</button>'
     + '<button class="btn danger" data-act="apagar" style="margin-top:9px">Apagar tudo e recomeçar</button></div>'
     + '<div class="card tight"><span class="sm dim">Este app guarda tudo no seu próprio iPhone. '
     + 'Nada é enviado para servidor nenhum. Os vídeos de execução e os mapas musculares vêm do MuscleWiki.</span></div>'
@@ -682,37 +698,19 @@ document.addEventListener('click', ev => {
     S.onb = { passo:0, resp:Object.assign({ evitar:[] }, S.cfg) };
     S.cfg = null; S.plano = null; render();
   }
-  else if (a === 'entrar' || a === 'criar-conta') {
-    const email = (document.getElementById('campoEmail') || {}).value;
-    const senha = (document.getElementById('campoSenha') || {}).value;
-    if (!email || !senha) { S.avisoSync = 'Preencha e-mail e senha.'; render(); return; }
-    alvo.textContent = 'Aguarde...';
-    S.avisoSync = '';
-    (a === 'entrar' ? entrar(email, senha) : criarConta(email, senha))
-      .then(res => {
-        if (res && res.confirmar) {
-          S.avisoSync = 'Conta criada. Confirme o link no seu e-mail e depois toque em Entrar.';
-          render(); return;
-        }
-        return sincronizar().then(r => {
-          S.ultimoSync = Date.now();
-          S.avisoSync = '';
-          render();
-          if (r.estado === 'baixou') alert('Pronto. Seus treinos foram baixados da nuvem.');
-          else alert('Pronto. Seus dados agora estão salvos na nuvem.');
-        });
-      })
-      .catch(e => { S.avisoSync = traduzErro(e.message); render(); });
+  else if (a === 'baixar-backup') {
+    try {
+      const blob = new Blob([JSON.stringify(dadosLocais())], { type:'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'meu-treino-' + hoje() + '.json';
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch(e){ alert('N\u00e3o deu para gerar o arquivo neste navegador. Use "Copiar meus dados".'); }
   }
-  else if (a === 'sair') {
-    if (confirm('Sair da conta? Os dados continuam neste aparelho.')) { sair(); S.ultimoSync = 0; render(); }
-  }
-  else if (a === 'sync') {
-    alvo.textContent = 'Sincronizando...';
-    sincronizar(true)
-      .then(r => { S.ultimoSync = Date.now(); S.avisoSync = ''; render();
-                   if (r.estado === 'offline') alert('Sem internet agora. Vai sincronizar sozinho quando voltar.'); })
-      .catch(e => { S.avisoSync = traduzErro(e.message); render(); });
+  else if (a === 'abrir-arquivo') {
+    const inp = document.getElementById('arquivoBackup');
+    if (inp) inp.click();
   }
   else if (a === 'backup') {
     const txt = localStorage.getItem(KEY) || '{}';
@@ -723,7 +721,12 @@ document.addEventListener('click', ev => {
   else if (a === 'restaurar') {
     const txt = prompt('Cole aqui o backup:');
     if (!txt) return;
-    try { JSON.parse(txt); localStorage.setItem(KEY, txt); carregar(); render(); alert('Dados restaurados.'); }
+    try {
+      const d = JSON.parse(txt);
+      aplicarDados(d, d.atualizado || Date.now());
+      espelhar(dadosLocais());
+      alert('Dados restaurados.');
+    }
     catch(e){ alert('Esse texto não parece um backup válido.'); }
   }
   else if (a === 'apagar') {
@@ -733,6 +736,21 @@ document.addEventListener('click', ev => {
       S.onb = { passo:0, resp:{ evitar:[] } }; render();
     }
   }
+});
+
+document.addEventListener('change', ev => {
+  if (ev.target.id !== 'arquivoBackup' || !ev.target.files || !ev.target.files[0]) return;
+  const leitor = new FileReader();
+  leitor.onload = () => {
+    try {
+      const d = JSON.parse(leitor.result);
+      if (!d || (!d.plano && !d.meus && !d.hist)) throw new Error('formato');
+      aplicarDados(d, d.atualizado || Date.now());
+      espelhar(dadosLocais());
+      alert('Backup restaurado.');
+    } catch(e){ alert('Esse arquivo n\u00e3o parece um backup do Meu Treino.'); }
+  };
+  leitor.readAsText(ev.target.files[0]);
 });
 
 document.addEventListener('input', ev => {
@@ -828,16 +846,7 @@ function concluirTreino(){
 /* ---------------- início ---------------- */
 carregar();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-if (typeof logado === 'function' && logado()) {
-  sincronizar().then(r => { S.ultimoSync = Date.now(); if (r.estado === 'baixou') render(); }).catch(() => {});
-}
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && typeof logado === 'function' && logado())
-    sincronizar().then(r => { S.ultimoSync = Date.now(); if (r.estado === 'baixou') render(); }).catch(() => {});
-});
-window.addEventListener('online', () => {
-  if (typeof logado === 'function' && logado()) sincronizar().catch(() => {});
-});
+conferirEspelho();
 if (S.plano && S.sessao) S.tela = 'hoje';
 render();
 if ('serviceWorker' in navigator) {
