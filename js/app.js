@@ -2,19 +2,40 @@
 'use strict';
 
 const KEY = 'meutreino.v1';
-const S = { cfg:null, plano:null, hist:[], sessao:null, cargas:{}, tela:'hoje', ctx:{}, onb:{ passo:0, resp:{ evitar:[] } } };
+const S = { cfg:null, plano:null, meus:[], hist:[], sessao:null, cargas:{}, tela:'hoje', ctx:{},
+            atualizado:0, ultimoSync:0, avisoSync:'',
+            onb:{ passo:0, resp:{ evitar:[] } } };
 
 /* ---------------- armazenamento ---------------- */
-function salvar(){
-  try { localStorage.setItem(KEY, JSON.stringify({ cfg:S.cfg, plano:S.plano, hist:S.hist, sessao:S.sessao, cargas:S.cargas })); }
+function dadosLocais(){
+  return { cfg:S.cfg, plano:S.plano, meus:S.meus, hist:S.hist, sessao:S.sessao,
+           cargas:S.cargas, atualizado:S.atualizado || 0 };
+}
+function gravar(d){
+  try { localStorage.setItem(KEY, JSON.stringify(d)); }
   catch(e){ console.warn('não deu para salvar', e); }
+}
+function salvar(){
+  S.atualizado = Date.now();
+  gravar(dadosLocais());
+  if (typeof agendarSync === 'function') agendarSync();
 }
 function carregar(){
   try {
     const d = JSON.parse(localStorage.getItem(KEY) || '{}');
-    S.cfg = d.cfg || null; S.plano = d.plano || null; S.hist = d.hist || [];
-    S.sessao = d.sessao || null; S.cargas = d.cargas || {};
+    S.cfg = d.cfg || null; S.plano = d.plano || null; S.meus = d.meus || []; S.hist = d.hist || [];
+    S.sessao = d.sessao || null; S.cargas = d.cargas || {}; S.atualizado = d.atualizado || 0;
   } catch(e){ console.warn('dados corrompidos, começando do zero', e); }
+}
+/* usado pela sincronização quando a nuvem está mais nova que o aparelho */
+function aplicarDados(d, quando){
+  if (!d) return;
+  S.cfg = d.cfg || null; S.plano = d.plano || null; S.meus = d.meus || []; S.hist = d.hist || [];
+  S.sessao = d.sessao || null; S.cargas = d.cargas || {};
+  S.atualizado = quando || d.atualizado || Date.now();
+  gravar(dadosLocais());
+  if (!S.cfg || !S.plano) S.tela = 'hoje';
+  render();
 }
 
 /* ---------------- utilidades ---------------- */
@@ -25,13 +46,35 @@ function hoje(){ const d = new Date(); return d.getFullYear()+'-'+String(d.getMo
 function dataBR(iso){ const [a,m,d] = iso.split('-'); return d+'/'+m; }
 function plural(n, um, muitos){ return n + ' ' + (n === 1 ? um : muitos); }
 
-/* ---------------- qual treino vem agora ---------------- */
-function proximoDia(){
-  if (!S.plano) return 0;
-  if (S.sessao) return S.sessao.diaIdx;
-  const ultimo = S.hist[0];
-  if (!ultimo) return 0;
-  return (ultimo.diaIdx + 1) % S.plano.dias.length;
+/* ---------------- referência de treino: 'p:2' = dia do plano, 'm:abc' = treino meu ---------------- */
+function diaPorRef(ref){
+  if (!ref) return null;
+  if (ref.charAt(0) === 'm') return S.meus.find(d => d.id === ref.slice(2)) || null;
+  return S.plano ? S.plano.dias[Number(ref.slice(2))] || null : null;
+}
+function refDe(s){ return s.ref || ('p:' + s.diaIdx); }   // entende registros antigos
+
+function proximaRef(){
+  if (S.sessao) return refDe(S.sessao);
+  if (!S.plano) return null;
+  const ultimoDoPlano = S.hist.find(x => refDe(x).charAt(0) === 'p');
+  if (!ultimoDoPlano) return 'p:0';
+  return 'p:' + ((Number(refDe(ultimoDoPlano).slice(2)) + 1) % S.plano.dias.length);
+}
+
+function novoTreinoMeu(){
+  const id = 'x' + Date.now().toString(36);
+  S.meus.unshift({ id, nome:'Meu treino', foco:'Montado por você', exercicios:[], duracao:0,
+                   aquecimento:'5 min de cardio leve e mobilidade antes da primeira série.' });
+  salvar();
+  return 'm:' + id;
+}
+
+/* recalcula foco e duração depois de mexer nos exercícios */
+function ajustarDia(dia){
+  const grupos = [...new Set(dia.exercicios.map(e => e.grupo))].map(g => LABEL.grupo[g] || g);
+  if (dia.id) dia.foco = grupos.length ? grupos.join(', ') : 'Montado por você';
+  dia.duracao = estimarDuracao(dia.exercicios);
 }
 function treinosDaSemana(){
   const limite = Date.now() - 7*864e5;
@@ -156,20 +199,27 @@ function telaOnboarding(){
 
 /* ---------------- tela: hoje ---------------- */
 function telaHoje(){
-  const idx = proximoDia();
-  const dia = S.plano.dias[idx];
+  const ref = proximaRef();
+  const dia = diaPorRef(ref);
   const semana = treinosDaSemana();
   const emAndamento = !!S.sessao;
-  const feitosIdx = new Set(semana.map(s => s.diaIdx));
+  const feitos = new Set(semana.map(s => refDe(s)));
 
   const lista = S.plano.dias.map((d, i) => {
-    const feito = feitosIdx.has(i);
-    return '<button class="exi" data-act="dia" data-i="' + i + '">'
-      + '<span class="badge' + (i === idx ? ' acc' : '') + '">' + (feito ? '✓' : (i+1)) + '</span>'
+    const r = 'p:' + i;
+    return '<button class="exi" data-act="dia" data-ref="' + r + '">'
+      + '<span class="badge' + (r === ref ? ' acc' : (feitos.has(r) ? ' ok' : '')) + '">' + (feitos.has(r) ? '✓' : (i+1)) + '</span>'
       + '<span class="grow"><span class="n">' + h(d.nome) + '</span>'
       + '<span class="s">' + h(d.foco) + ' · ' + plural(d.exercicios.length,'exercício','exercícios') + '</span></span>'
       + '<span class="go">›</span></button>';
   }).join('');
+
+  const meus = S.meus.length
+    ? S.meus.map(d => '<button class="exi" data-act="dia" data-ref="m:' + d.id + '">'
+        + '<span class="badge">★</span><span class="grow"><span class="n">' + h(d.nome) + '</span>'
+        + '<span class="s">' + plural(d.exercicios.length,'exercício','exercícios')
+        + (d.duracao ? ' · ~' + d.duracao + ' min' : '') + '</span></span><span class="go">›</span></button>').join('')
+    : '<div class="sm dim" style="padding:4px 0 10px">Monte um treino do seu jeito, escolhendo os exercícios na mão.</div>';
 
   return '<div class="wrap fade" style="padding-top:16px">'
     + '<div class="card hero">'
@@ -181,14 +231,16 @@ function telaHoje(){
     + '<span class="chip">' + plural(dia.exercicios.length,'exercício','exercícios') + '</span>'
     + '<span class="chip">~' + dia.duracao + ' min</span>'
     + '<span class="chip">' + h(LABEL.objetivo[S.cfg.objetivo]) + '</span></div>'
-    + '<button class="btn" data-act="iniciar" data-i="' + idx + '">' + (emAndamento ? 'Continuar treino' : 'Começar treino') + '</button>'
-    + '<button class="btn ghost" data-act="dia" data-i="' + idx + '" style="margin-top:9px">Ver os exercícios</button>'
+    + '<button class="btn" data-act="iniciar" data-ref="' + ref + '">' + (emAndamento ? 'Continuar treino' : 'Começar treino') + '</button>'
+    + '<button class="btn ghost" data-act="dia" data-ref="' + ref + '" style="margin-top:9px">Ver os exercícios</button>'
     + '</div>'
     + '<div class="grid2" style="margin-bottom:12px">'
     + '<div class="stat"><b>' + semana.length + '</b><span class="sm dim">treinos nos últimos 7 dias</span></div>'
     + '<div class="stat"><b>' + S.hist.length + '</b><span class="sm dim">treinos no total</span></div>'
     + '</div>'
     + '<div class="card"><div class="xs dim" style="margin-bottom:6px">Sua semana · ' + h(S.plano.split) + '</div>' + lista + '</div>'
+    + '<div class="card"><div class="row between" style="margin-bottom:6px"><span class="xs dim">Meus treinos</span>'
+    + '<button class="btn sm ghost" data-act="novo-treino">+ Montar treino</button></div>' + meus + '</div>'
     + (naoInstalado() ? cardInstalar() : '')
     + '</div>';
 }
@@ -199,29 +251,97 @@ function naoInstalado(){
 function cardInstalar(){
   return '<div class="card tight"><div class="row"><span class="badge">📱</span><span class="grow">'
     + '<span class="sm" style="font-weight:650">Instale na tela de início</span><br>'
-    + '<span class="sm dim">No Safari: botão Compartilhar → Adicionar à Tela de Início.</span></span></div></div>';
+    + '<span class="sm dim">No Safari: Compartilhar → Adicionar à Tela de Início. '
+    + 'Atenção: o app instalado tem armazenamento próprio, separado do Safari — '
+    + 'o que você registrar aqui não aparece lá.</span></span></div></div>';
 }
 
 /* ---------------- tela: dia ---------------- */
 function telaDia(){
-  const i = S.ctx.dia, dia = S.plano.dias[i];
-  const lista = dia.exercicios.map(e => {
+  const ref = S.ctx.ref, dia = diaPorRef(ref);
+  if (!dia) return '<div class="empty">Treino não encontrado.</div>';
+  const meu = ref.charAt(0) === 'm';
+  const lista = dia.exercicios.length ? dia.exercicios.map(e => {
     const ex = exPorId(e.id);
     return '<button class="exi" data-act="ex" data-id="' + e.id + '" data-volta="dia">'
       + thumbHTML(e.id)
       + '<span class="grow"><span class="n">' + h(e.nome) + '</span>'
       + '<span class="s">' + e.series + ' x ' + e.reps + ' · descanso ' + e.descanso + 's'
       + (e.obs ? ' · ' + h(e.obs) : '') + '</span></span><span class="go">›</span></button>';
-  }).join('');
+  }).join('') : '<div class="sm dim" style="padding:6px 0">Nenhum exercício ainda. Toque em Editar para escolher.</div>';
+
   return '<div class="wrap fade" style="padding-top:16px">'
     + '<div class="card"><div class="xs dim">' + h(dia.foco) + '</div>'
     + '<h2 style="margin:6px 0 10px">' + h(dia.nome) + '</h2>'
     + '<div class="row" style="gap:8px"><span class="chip">~' + dia.duracao + ' min</span>'
-    + '<span class="chip">' + plural(dia.exercicios.length,'exercício','exercícios') + '</span></div></div>'
+    + '<span class="chip">' + plural(dia.exercicios.length,'exercício','exercícios') + '</span>'
+    + (meu ? '<span class="chip on">treino meu</span>' : '') + '</div></div>'
     + '<div class="card tight"><div class="xs dim" style="margin-bottom:4px">Aquecimento</div>'
     + '<div class="sm">' + h(dia.aquecimento) + '</div></div>'
     + '<div class="card">' + lista + '</div>'
-    + '<button class="btn" data-act="iniciar" data-i="' + i + '">Começar este treino</button>'
+    + (dia.exercicios.length ? '<button class="btn" data-act="iniciar" data-ref="' + ref + '">Começar este treino</button>' : '')
+    + '<button class="btn ghost" data-act="editar" data-ref="' + ref + '">Editar exercícios</button>'
+    + '<div style="height:20px"></div></div>';
+}
+
+/* ---------------- tela: editar um treino ---------------- */
+function telaEditar(){
+  const ref = S.ctx.ref, dia = diaPorRef(ref);
+  if (!dia) return '<div class="empty">Treino não encontrado.</div>';
+  const meu = ref.charAt(0) === 'm';
+  const ultimo = dia.exercicios.length - 1;
+
+  const itens = dia.exercicios.map((e, i) => {
+    const ex = exPorId(e.id);
+    const porTempo = ex && ex.tempo;
+    return '<div class="card"><div class="row" style="margin-bottom:10px">'
+      + thumbHTML(e.id)
+      + '<div class="grow"><h3>' + h(e.nome) + '</h3>'
+      + '<span class="sm dim">' + h(LABEL.grupo[e.grupo] || e.grupo) + '</span></div>'
+      + '<button class="mini" data-act="sobe" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>'
+      + '<button class="mini" data-act="desce" data-i="' + i + '"' + (i === ultimo ? ' disabled' : '') + '>↓</button>'
+      + '<button class="mini rm" data-act="tira-ex" data-i="' + i + '">✕</button></div>'
+      + '<div class="campos">'
+      + '<label><span class="xs dim">Séries</span><input class="inp" inputmode="numeric" data-campo="series" data-i="' + i + '" value="' + h(e.series) + '"></label>'
+      + '<label><span class="xs dim">' + (porTempo ? 'Tempo' : 'Repetições') + '</span><input class="inp" data-campo="reps" data-i="' + i + '" value="' + h(e.reps) + '"></label>'
+      + '<label><span class="xs dim">Descanso</span><input class="inp" inputmode="numeric" data-campo="descanso" data-i="' + i + '" value="' + h(e.descanso) + '"></label>'
+      + '</div></div>';
+  }).join('');
+
+  return '<div class="wrap fade" style="padding-top:16px">'
+    + (meu
+      ? '<div class="card"><span class="xs dim" style="display:block">Nome do treino</span>'
+        + '<input class="inp" style="text-align:left;margin-top:8px;font-weight:650" data-campo="nome" value="' + h(dia.nome) + '"></div>'
+      : '<div class="card tight"><span class="sm dim">Editando <b>' + h(dia.nome) + '</b>, do plano gerado. '
+        + 'Gerar outra variação desfaz estas mudanças.</span></div>')
+    + (itens || '<div class="sm dim" style="padding:4px 0 14px">Nenhum exercício ainda.</div>')
+    + '<button class="btn" data-act="catalogo">+ Adicionar exercício</button>'
+    + '<button class="btn ghost" data-act="dia" data-ref="' + ref + '" style="margin-top:10px">Pronto</button>'
+    + (meu ? '<button class="btn danger" data-act="apaga-treino" data-ref="' + ref + '" style="margin-top:10px">Excluir este treino</button>' : '')
+    + '<div style="height:24px"></div></div>';
+}
+
+/* ---------------- tela: catálogo de exercícios ---------------- */
+const GRUPOS = ['peito','costas','pernas','ombros','biceps','triceps','core','cardio'];
+function semAcento(t){ return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+
+function telaCatalogo(){
+  const busca = S.ctx.busca || '', grupo = S.ctx.grupo || '';
+  const alvo = semAcento(busca);
+  const lista = EX.filter(e => (!grupo || e.grupo === grupo)
+      && (!alvo || semAcento(e.nome).includes(alvo) || semAcento(e.musculos).includes(alvo)))
+    .map(e => '<button class="exi" data-act="pega-ex" data-id="' + e.id + '">' + thumbHTML(e.id)
+      + '<span class="grow"><span class="n">' + h(e.nome) + '</span>'
+      + '<span class="s">' + h(LABEL.grupo[e.grupo] || e.grupo) + ' · ' + h(e.musculos) + '</span></span>'
+      + '<span class="go">+</span></button>').join('');
+
+  return '<div class="wrap fade" style="padding-top:16px">'
+    + '<input class="inp busca" data-campo="busca" placeholder="Buscar exercício..." value="' + h(busca) + '">'
+    + '<div class="chips" style="margin:12px 0 14px">'
+    + '<button class="chip' + (grupo ? '' : ' on') + '" data-act="filtro" data-g="">Todos</button>'
+    + GRUPOS.map(g => '<button class="chip' + (grupo === g ? ' on' : '') + '" data-act="filtro" data-g="' + g + '">'
+        + h(LABEL.grupo[g]) + '</button>').join('') + '</div>'
+    + '<div class="card">' + (lista || '<div class="sm dim">Nenhum exercício encontrado.</div>') + '</div>'
     + '<div style="height:20px"></div></div>';
 }
 
@@ -244,7 +364,8 @@ function telaEx(){
 
 /* ---------------- tela: treino em execução ---------------- */
 function telaTreino(){
-  const s = S.sessao, dia = S.plano.dias[s.diaIdx];
+  const s = S.sessao, dia = diaPorRef(refDe(s));
+  if (!dia) return '<div class="empty">Treino não encontrado.</div>';
   let feitas = 0, total = 0;
   dia.exercicios.forEach(e => { const arr = s.series[e.id] || []; total += arr.length; feitas += arr.filter(x => x.ok).length; });
   const pct = total ? Math.round(feitas/total*100) : 0;
@@ -284,7 +405,7 @@ function telaTreino(){
 function telaPlano(){
   const c = S.cfg;
   const dias = S.plano.dias.map((d, i) =>
-    '<button class="exi" data-act="dia" data-i="' + i + '"><span class="badge">' + (i+1) + '</span>'
+    '<button class="exi" data-act="dia" data-ref="p:' + i + '"><span class="badge">' + (i+1) + '</span>'
     + '<span class="grow"><span class="n">' + h(d.nome) + '</span><span class="s">'
     + d.exercicios.map(e => h(e.nome)).join(' · ') + '</span></span><span class="go">›</span></button>').join('');
   return '<div class="wrap fade" style="padding-top:16px">'
@@ -298,6 +419,16 @@ function telaPlano(){
     + (c.evitar && c.evitar.length ? '<span class="chip">evitando: ' + h(c.evitar.join(', ')) + '</span>' : '')
     + '</div></div>'
     + '<div class="card">' + dias + '</div>'
+    + '<div class="card"><div class="row between" style="margin-bottom:6px"><span class="xs dim">Meus treinos</span>'
+    + '<button class="btn sm ghost" data-act="novo-treino">+ Montar treino</button></div>'
+    + (S.meus.length
+        ? S.meus.map(d => '<button class="exi" data-act="dia" data-ref="m:' + d.id + '">'
+            + '<span class="badge">★</span><span class="grow"><span class="n">' + h(d.nome) + '</span>'
+            + '<span class="s">' + (d.exercicios.length
+                ? d.exercicios.map(e => h(e.nome)).join(' · ')
+                : 'sem exercícios ainda') + '</span></span><span class="go">›</span></button>').join('')
+        : '<div class="sm dim" style="padding:4px 0 10px">Você ainda não montou nenhum treino.</div>')
+    + '</div>'
     + '<button class="btn ghost" data-act="variar">Gerar outra variação dos exercícios</button>'
     + '<button class="btn ghost" data-act="refazer" style="margin-top:9px">Refazer o questionário</button>'
     + '<div style="height:20px"></div></div>';
@@ -321,8 +452,51 @@ function telaHistorico(){
 }
 
 /* ---------------- tela: ajustes ---------------- */
+function statusSync(){
+  if (S.avisoSync) return S.avisoSync;
+  if (!S.ultimoSync) return 'ainda não sincronizou neste aparelho';
+  const min = Math.round((Date.now() - S.ultimoSync) / 60000);
+  return min < 1 ? 'sincronizado agora' : 'sincronizado há ' + plural(min, 'minuto', 'minutos');
+}
+
+function traduzErro(m){
+  m = String(m || '');
+  if (/Invalid login/i.test(m)) return 'E-mail ou senha incorretos.';
+  if (/already registered/i.test(m)) return 'Esse e-mail já tem conta. Use Entrar.';
+  if (/at least 6/i.test(m)) return 'A senha precisa de pelo menos 6 caracteres.';
+  if (/valid email/i.test(m)) return 'E-mail inválido.';
+  if (/Failed to fetch|NetworkError/i.test(m)) return 'Sem conexão com a internet.';
+  if (/rate limit|too many/i.test(m)) return 'Muitas tentativas. Espere um minuto.';
+  return m;
+}
+
+function cardConta(){
+  if (!nuvemLigada())
+    return '<div class="card"><div class="xs dim" style="margin-bottom:8px">Conta</div>'
+      + '<div class="sm dim">A sincronização entre aparelhos ainda não foi configurada. '
+      + 'Por enquanto os dados ficam só neste aparelho.</div></div>';
+
+  if (logado())
+    return '<div class="card"><div class="xs dim" style="margin-bottom:10px">Conta</div>'
+      + '<div class="row"><span class="badge acc">' + h((AUTH.email || '?').charAt(0).toUpperCase()) + '</span>'
+      + '<span class="grow"><span class="sm" style="font-weight:650">' + h(AUTH.email || '') + '</span>'
+      + '<span class="sm dim">' + h(statusSync()) + '</span></span></div>'
+      + '<button class="btn ghost" data-act="sync" style="margin-top:14px">Sincronizar agora</button>'
+      + '<button class="btn danger" data-act="sair" style="margin-top:10px">Sair da conta</button></div>';
+
+  return '<div class="card"><div class="xs dim" style="margin-bottom:10px">Conta</div>'
+    + '<div class="sm dim" style="margin-bottom:13px">Entre para guardar treinos e histórico na nuvem '
+    + 'e continuar de onde parou em qualquer aparelho.</div>'
+    + '<input class="inp busca" id="campoEmail" type="email" inputmode="email" autocomplete="email" placeholder="seu@email.com">'
+    + '<input class="inp busca" id="campoSenha" type="password" autocomplete="current-password" placeholder="senha" style="margin-top:9px">'
+    + (S.avisoSync ? '<div class="sm" style="color:#FF8A7E;margin-top:10px">' + h(S.avisoSync) + '</div>' : '')
+    + '<button class="btn" data-act="entrar" style="margin-top:13px">Entrar</button>'
+    + '<button class="btn ghost" data-act="criar-conta" style="margin-top:10px">Criar conta</button></div>';
+}
+
 function telaAjustes(){
   return '<div class="wrap fade" style="padding-top:16px">'
+    + cardConta()
     + cardInstalar()
     + '<div class="card"><div class="xs dim" style="margin-bottom:10px">Rotina</div>'
     + '<button class="btn ghost" data-act="refazer">Refazer o questionário</button>'
@@ -388,7 +562,8 @@ const TABS = [
   { k:'historico', t:'Histórico', d:'M12 8v4l3 2M3 12a9 9 0 1 0 3-6.7L3 8' },
   { k:'ajustes', t:'Ajustes', d:'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 2.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V1a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 17 2.6a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z' }
 ];
-const TITULOS = { hoje:'Meu Treino', plano:'Meu plano', historico:'Histórico', ajustes:'Ajustes', dia:'Treino', ex:'Exercício', treino:'Treinando' };
+const TITULOS = { hoje:'Meu Treino', plano:'Meu plano', historico:'Histórico', ajustes:'Ajustes',
+                  dia:'Treino', ex:'Exercício', treino:'Treinando', editar:'Editar treino', catalogo:'Escolher exercício' };
 
 function render(){
   const t = S.tela;
@@ -399,12 +574,13 @@ function render(){
     return;
   }
   document.body.style.paddingBottom = '';
-  const temVoltar = ['dia','ex','treino'].includes(t);
+  const temVoltar = ['dia','ex','treino','editar','catalogo'].includes(t);
   $('#top').innerHTML = '<div class="wrap">'
     + (temVoltar ? '<button class="back" data-act="voltar">‹</button>' : '')
     + '<h1>' + h(TITULOS[t] || 'Meu Treino') + '</h1></div>';
   $('#app').innerHTML = ({ hoje:telaHoje, plano:telaPlano, historico:telaHistorico, ajustes:telaAjustes,
-                           dia:telaDia, ex:telaEx, treino:telaTreino }[t] || telaHoje)();
+                           dia:telaDia, ex:telaEx, treino:telaTreino,
+                           editar:telaEditar, catalogo:telaCatalogo }[t] || telaHoje)();
   $('#tabs').innerHTML = '<div class="wrap">' + TABS.map(x =>
     '<button class="tab' + (x.k === t ? ' on' : '') + '" data-act="tab" data-k="' + x.k + '">'
     + '<svg viewBox="0 0 24 24"><path d="' + x.d + '"/></svg><span>' + x.t + '</span></button>').join('') + '</div>';
@@ -448,14 +624,48 @@ document.addEventListener('click', ev => {
     }
   }
   else if (a === 'tab') ir(alvo.dataset.k);
-  else if (a === 'dia') ir('dia', { dia:Number(alvo.dataset.i) });
+  else if (a === 'dia') ir('dia', { ref:alvo.dataset.ref });
+  else if (a === 'editar') ir('editar', { ref:alvo.dataset.ref });
+  else if (a === 'novo-treino') ir('editar', { ref:novoTreinoMeu() });
+  else if (a === 'catalogo') ir('catalogo', { busca:'', grupo:'' });
+  else if (a === 'filtro') { S.ctx.grupo = alvo.dataset.g; render(); }
+  else if (a === 'pega-ex') {
+    const dia = diaPorRef(S.ctx.ref), ex = exPorId(alvo.dataset.id);
+    if (dia && ex) {
+      const p = prescrever(ex, S.cfg || { objetivo:'hipertrofia', nivel:2 });
+      dia.exercicios.push(Object.assign({ id:ex.id, nome:ex.nome, grupo:ex.grupo }, p));
+      ajustarDia(dia); salvar();
+    }
+    ir('editar');
+  }
+  else if (a === 'sobe' || a === 'desce') {
+    const dia = diaPorRef(S.ctx.ref), i = Number(alvo.dataset.i), j = a === 'sobe' ? i-1 : i+1;
+    if (dia && dia.exercicios[j]) {
+      const t2 = dia.exercicios[i]; dia.exercicios[i] = dia.exercicios[j]; dia.exercicios[j] = t2;
+      salvar(); render();
+    }
+  }
+  else if (a === 'tira-ex') {
+    const dia = diaPorRef(S.ctx.ref);
+    if (dia) { dia.exercicios.splice(Number(alvo.dataset.i), 1); ajustarDia(dia); salvar(); render(); }
+  }
+  else if (a === 'apaga-treino') {
+    const id = alvo.dataset.ref.slice(2);
+    if (confirm('Excluir este treino?')) {
+      S.meus = S.meus.filter(d => d.id !== id);
+      if (S.sessao && refDe(S.sessao) === alvo.dataset.ref) S.sessao = null;
+      salvar(); ir('plano');
+    }
+  }
   else if (a === 'ex') ir('ex', { ex:alvo.dataset.id, volta:alvo.dataset.volta });
   else if (a === 'voltar') {
     if (S.tela === 'ex') ir(S.ctx.volta === 'treino' ? 'treino' : 'dia');
+    else if (S.tela === 'catalogo') ir('editar');
+    else if (S.tela === 'editar') ir('dia');
     else if (S.tela === 'treino') ir('hoje');
     else ir('hoje');
   }
-  else if (a === 'iniciar') iniciarTreino(Number(alvo.dataset.i));
+  else if (a === 'iniciar') iniciarTreino(alvo.dataset.ref);
   else if (a === 'tick') marcarSerie(alvo.dataset.ex, Number(alvo.dataset.i), Number(alvo.dataset.desc));
   else if (a === 'rest-mais') { restFim += 15000; tickDescanso(); }
   else if (a === 'rest-fim') pararDescanso();
@@ -471,6 +681,38 @@ document.addEventListener('click', ev => {
   else if (a === 'refazer') {
     S.onb = { passo:0, resp:Object.assign({ evitar:[] }, S.cfg) };
     S.cfg = null; S.plano = null; render();
+  }
+  else if (a === 'entrar' || a === 'criar-conta') {
+    const email = (document.getElementById('campoEmail') || {}).value;
+    const senha = (document.getElementById('campoSenha') || {}).value;
+    if (!email || !senha) { S.avisoSync = 'Preencha e-mail e senha.'; render(); return; }
+    alvo.textContent = 'Aguarde...';
+    S.avisoSync = '';
+    (a === 'entrar' ? entrar(email, senha) : criarConta(email, senha))
+      .then(res => {
+        if (res && res.confirmar) {
+          S.avisoSync = 'Conta criada. Confirme o link no seu e-mail e depois toque em Entrar.';
+          render(); return;
+        }
+        return sincronizar().then(r => {
+          S.ultimoSync = Date.now();
+          S.avisoSync = '';
+          render();
+          if (r.estado === 'baixou') alert('Pronto. Seus treinos foram baixados da nuvem.');
+          else alert('Pronto. Seus dados agora estão salvos na nuvem.');
+        });
+      })
+      .catch(e => { S.avisoSync = traduzErro(e.message); render(); });
+  }
+  else if (a === 'sair') {
+    if (confirm('Sair da conta? Os dados continuam neste aparelho.')) { sair(); S.ultimoSync = 0; render(); }
+  }
+  else if (a === 'sync') {
+    alvo.textContent = 'Sincronizando...';
+    sincronizar(true)
+      .then(r => { S.ultimoSync = Date.now(); S.avisoSync = ''; render();
+                   if (r.estado === 'offline') alert('Sem internet agora. Vai sincronizar sozinho quando voltar.'); })
+      .catch(e => { S.avisoSync = traduzErro(e.message); render(); });
   }
   else if (a === 'backup') {
     const txt = localStorage.getItem(KEY) || '{}';
@@ -494,7 +736,28 @@ document.addEventListener('click', ev => {
 });
 
 document.addEventListener('input', ev => {
-  const el = ev.target;
+  const el = ev.target, campo = el.dataset && el.dataset.campo;
+  if (campo === 'busca') {
+    S.ctx.busca = el.value;
+    const cursor = el.selectionStart;
+    render();
+    const novo = document.querySelector('.busca');
+    if (novo) { novo.focus(); novo.setSelectionRange(cursor, cursor); }
+    return;
+  }
+  if (campo) {
+    const dia = diaPorRef(S.ctx.ref);
+    if (!dia) return;
+    if (campo === 'nome') { dia.nome = el.value; }
+    else {
+      const item = dia.exercicios[Number(el.dataset.i)];
+      if (!item) return;
+      item[campo] = campo === 'reps' ? el.value : (parseInt(el.value, 10) || 0);
+      ajustarDia(dia);
+    }
+    salvar();
+    return;
+  }
   if (!el.dataset || !el.dataset.f || !S.sessao) return;
   const arr = S.sessao.series[el.dataset.ex];
   if (!arr) return;
@@ -503,15 +766,16 @@ document.addEventListener('input', ev => {
 });
 
 /* ---------------- fluxo do treino ---------------- */
-function iniciarTreino(idx){
-  if (!S.sessao || S.sessao.diaIdx !== idx) {
+function iniciarTreino(ref){
+  const dia = diaPorRef(ref);
+  if (!dia || !dia.exercicios.length) { alert('Este treino ainda não tem exercícios.'); return; }
+  if (!S.sessao || refDe(S.sessao) !== ref) {
     if (S.sessao && !confirm('Você tem um treino em andamento. Começar outro apaga o atual.')) return;
-    const dia = S.plano.dias[idx];
     const series = {};
     dia.exercicios.forEach(e => {
-      series[e.id] = Array.from({ length:e.series }, () => ({ peso:'', reps:'', ok:false }));
+      series[e.id] = Array.from({ length:Math.max(1, e.series) }, () => ({ peso:'', reps:'', ok:false }));
     });
-    S.sessao = { diaIdx:idx, inicio:Date.now(), series };
+    S.sessao = { ref, diaIdx:(ref.charAt(0) === 'p' ? Number(ref.slice(2)) : -1), inicio:Date.now(), series };
     salvar();
   }
   manterAcesa(true);
@@ -527,8 +791,9 @@ function marcarSerie(exId, i, descanso){
     if (!set.peso && i > 0 && arr[i-1].peso) set.peso = arr[i-1].peso;
     if (!set.peso && S.cargas[exId]) set.peso = S.cargas[exId].peso;
     if (!set.reps) {
-      const dia = S.plano.dias[S.sessao.diaIdx];
-      const item = dia.exercicios.find(e => e.id === exId);
+      const dia = diaPorRef(refDe(S.sessao));
+      const item = dia && dia.exercicios.find(e => e.id === exId);
+      if (!item) return;
       set.reps = i > 0 && arr[i-1].reps ? arr[i-1].reps : String(item.reps).split(' ')[0];
     }
     if (set.peso || set.reps) S.cargas[exId] = { peso:set.peso, reps:set.reps };
@@ -539,7 +804,8 @@ function marcarSerie(exId, i, descanso){
 }
 
 function concluirTreino(){
-  const s = S.sessao, dia = S.plano.dias[s.diaIdx];
+  const s = S.sessao, dia = diaPorRef(refDe(s));
+  if (!dia) { S.sessao = null; salvar(); ir('hoje'); return; }
   let series = 0, volume = 0;
   dia.exercicios.forEach(e => (s.series[e.id] || []).forEach(x => {
     if (!x.ok) return;
@@ -550,7 +816,7 @@ function concluirTreino(){
   }));
   if (!series) { alert('Marque pelo menos uma série antes de concluir.'); return; }
   S.hist.unshift({
-    ts:Date.now(), data:hoje(), diaIdx:s.diaIdx, diaNome:dia.nome, series, volume,
+    ts:Date.now(), data:hoje(), ref:refDe(s), diaIdx:s.diaIdx, diaNome:dia.nome, series, volume,
     duracaoMin:Math.max(1, Math.round((Date.now() - s.inicio)/60000))
   });
   S.hist = S.hist.slice(0, 200);
@@ -561,6 +827,17 @@ function concluirTreino(){
 
 /* ---------------- início ---------------- */
 carregar();
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+if (typeof logado === 'function' && logado()) {
+  sincronizar().then(r => { S.ultimoSync = Date.now(); if (r.estado === 'baixou') render(); }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && typeof logado === 'function' && logado())
+    sincronizar().then(r => { S.ultimoSync = Date.now(); if (r.estado === 'baixou') render(); }).catch(() => {});
+});
+window.addEventListener('online', () => {
+  if (typeof logado === 'function' && logado()) sincronizar().catch(() => {});
+});
 if (S.plano && S.sessao) S.tela = 'hoje';
 render();
 if ('serviceWorker' in navigator) {
